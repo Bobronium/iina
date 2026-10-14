@@ -53,7 +53,6 @@ class PlayerWindowController: NSWindowController, NSWindowDelegate {
     .enableToneMappingParamOverride,
     .enableToneMappingTargetPeakOverride,
     .toneMappingTargetPeak,
-    .loadIccProfile,
     .toneMappingAlgorithm,
     .toneMappingParamOverride,
     .toneMappingTargetPeakOverride,
@@ -82,7 +81,6 @@ class PlayerWindowController: NSWindowController, NSWindowDelegate {
       PK.enableToneMappingParamOverride.rawValue,
       PK.enableToneMappingTargetPeakOverride.rawValue,
       PK.toneMappingTargetPeak.rawValue,
-      PK.loadIccProfile.rawValue,
       PK.toneMappingAlgorithm.rawValue,
       PK.toneMappingParamOverride.rawValue,
       PK.toneMappingTargetPeakOverride.rawValue:

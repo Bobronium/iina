@@ -6,7 +6,10 @@
 //  Copyright © 2017 lhc. All rights reserved.
 //
 
+import AVFoundation
 import Cocoa
+import CoreImage
+import IOSurface
 import OpenGL.GL
 import OpenGL.GL3
 
@@ -58,76 +61,78 @@ let attributeLookUp: [UInt32: String] = [
     kCGLPFASupportsAutomaticGraphicsSwitching.rawValue: "kCGLPFASupportsAutomaticGraphicsSwitching"
 ]
 
-/// OpenGL layer for `VideoView`.
+/// Video layer for `VideoView`.
 ///
-/// This class is structured to make it easier to compare it to the reference implementation in the mpv player. Methods and statements
-/// are in the same order as found in the mpv source. However there are differences that cause the implementation to not match up. For
-/// example IINA draws using a background thread whereas mpv uses the main thread. When IINA tested drawing on the main thread
-/// the sliding animation to show and hide the side panels was _very_ slugish and moving the floating OSC was jerky.
-class ViewLayer: CAOpenGLLayer {
+/// mpv renders each frame with OpenGL into an IOSurface-backed pixel buffer that is tagged with the colorimetry mpv
+/// rendered in and enqueued here, so macOS color matches and tone maps it the same way it does for QuickTime Player.
+///
+/// ```swift
+/// videoLayer.colorimetry = mpv.videoColorimetry()!.presentable
+/// videoLayer.showsHighDynamicRange = player.info.hdrEnabled
+/// videoLayer.update(force: true)
+/// ```
+class ViewLayer: AVSampleBufferDisplayLayer {
+
+  /// `true` when macOS can be asked to tone map HDR frames down to SDR.
+  static var canShowHighDynamicRangeAsStandard: Bool {
+    if #available(macOS 26.0, *) { return true }
+    return false
+  }
 
   private weak var videoView: VideoView!
 
   private let mpvGLQueue = DispatchQueue(label: "com.colliderli.iina.mpvgl", qos: .userInteractive)
 
-  private var bufferDepth: GLint = 8
-
   private let cglContext: CGLContextObj
   private let cglPixelFormat: CGLPixelFormatObj
 
-  /// Lock to single thread calls to `display`.
-  private let displayLock: NSLocking
+  /// Accessed only on `mpvGLQueue` with the OpenGL context locked.
+  private var framePool: FramePool?
 
-  private var fbo: GLint = 1
+  @Atomic var colorimetry = VideoColorimetry.standardDynamicRange
 
-  /// Lock used to allow the main thread priority access to `displayLock`.
-  private var mainThreadPriorityLock = MainThreadPriorityLock()
-
-  /// When `true` the frame needs to be rendered.
-  @Atomic private var needsFlip = false
+  var showsHighDynamicRange = true {
+    didSet {
+      guard #available(macOS 26.0, *) else { return }
+      preferredDynamicRange = showsHighDynamicRange ? .high : .standard
+    }
+  }
 
   /// When `true` drawing will proceed even if mpv indicates nothing needs to be done.
   @Atomic private var forceDraw = false
 
   /// Indicates whether the view is being rendered as part of a live resizing operation.
-  ///
-  /// This flag is used to manage setting of the
-  /// [isAsynchronous](https://developer.apple.com/documentation/quartzcore/caopengllayer/isasynchronous)
-  /// property. When `isAsynchronous` is `true` [canDraw](https://developer.apple.com/documentation/quartzcore/caopengllayer/candraw(incglcontext:pixelformat:forlayertime:displaytime:))
-  /// is called periodically to determine if the OpenGL content should be updated. This is used when the window is being resized. When [windowDidEndLiveResize](https://developer.apple.com/documentation/appkit/nswindowdelegate/windowdidendliveresize(_:))
-  /// is called it is important to not set `isAsynchronous` to `false` until a draw has occurred. Setting this flag to `false`
-  /// will cause `canDraw` to set `isAsynchronous` to `false` only once another drawing is in process. This reduces the
-  /// likelihood of seeing a very short momentary black screen when exiting full screen mode.
   @Atomic var inLiveResize: Bool = false {
     didSet {
-      if inLiveResize {
-        isAsynchronous = true
-      }
+      update(force: true)
+    }
+  }
+
+  override var bounds: CGRect {
+    didSet {
+      guard bounds.size != oldValue.size else { return }
+      update(force: true)
+    }
+  }
+
+  override var contentsScale: CGFloat {
+    didSet {
+      guard contentsScale != oldValue else { return }
       update(force: true)
     }
   }
 
   /// Returns an initialized `ViewLayer` object.
-  ///
-  /// For the display lock a recursive lock is needed because the call to `CATransaction.flush()` in `display` calls
-  /// `display_if_needed` which will then call `display` if layout is needed. See the discussion in PR
-  /// [#5029](https://github.com/iina/iina/pull/5029).
   /// - Parameter videoView: The view this layer will be associated with.
   init(_ videoView: VideoView) {
     self.videoView = videoView
-    (cglPixelFormat, bufferDepth) = ViewLayer.createPixelFormat(videoView.player)
+    cglPixelFormat = ViewLayer.createPixelFormat(videoView.player)
     cglContext = ViewLayer.createContext(cglPixelFormat)
-    displayLock = NSRecursiveLock()
     super.init()
     autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
     backgroundColor = NSColor.black.cgColor
-    if bufferDepth > 8 {
-      contentsFormat = .RGBA16Float
-    }
-    isAsynchronous = false
-    // when resized but mpv hasn't rendered a new frame,
-    // the old content's aspect ratio should be preserved.
-    contentsGravity = .resizeAspectFill
+    // When resized but mpv hasn't rendered a new frame, the old content's aspect ratio should be preserved.
+    videoGravity = .resizeAspectFill
   }
 
   /// Returns an initialized shadow copy of the given layer with custom instance variables copied from `layer`.
@@ -142,14 +147,9 @@ class ViewLayer: CAOpenGLLayer {
     videoView = previousLayer.videoView
     cglPixelFormat = previousLayer.cglPixelFormat
     cglContext = previousLayer.cglContext
-    displayLock = previousLayer.displayLock
     super.init(layer: layer)
-    autoresizingMask = previousLayer.autoresizingMask
-    backgroundColor = previousLayer.backgroundColor
-    wantsExtendedDynamicRangeContent = previousLayer.wantsExtendedDynamicRangeContent
-    contentsFormat = previousLayer.contentsFormat
-    inLiveResize = previousLayer.inLiveResize
-    isAsynchronous = previousLayer.isAsynchronous
+    colorimetry = previousLayer.colorimetry
+    showsHighDynamicRange = previousLayer.showsHighDynamicRange
     Logger.log("Created view layer shadow copy")
   }
 
@@ -159,82 +159,108 @@ class ViewLayer: CAOpenGLLayer {
 
   // MARK: - Draw
 
-  override func canDraw(inCGLContext ctx: CGLContextObj, pixelFormat pf: CGLPixelFormatObj,
-                        forLayerTime t: CFTimeInterval, displayTime ts: UnsafePointer<CVTimeStamp>?) -> Bool {
-    // When in live resize, skip all drawing calls on the main thread.
-    // Setting isAsynchronous = true is enough to prevent jittering.
-    guard !(inLiveResize && Thread.isMainThread) else { return false }
-    return videoView.$isUninited.withReadLock() { isUninited in
-      guard !isUninited else { return false }
-      if !inLiveResize {
-        isAsynchronous = false
-      }
-      return forceDraw || videoView.player.mpv.shouldRenderUpdateFrame()
+  func update(force: Bool = false) {
+    mpvGLQueue.async { [self] in
+      if force { forceDraw = true }
+      renderFrameIfNeeded()
     }
   }
 
-  override func draw(inCGLContext ctx: CGLContextObj, pixelFormat pf: CGLPixelFormatObj,
-                     forLayerTime t: CFTimeInterval, displayTime ts: UnsafePointer<CVTimeStamp>?) {
+  /// Release the OpenGL objects backing rendered frames.
+  /// - Important: The OpenGL context must be locked by the caller.
+  func releaseFrames() {
+    framePool?.deleteFramebuffers()
+    framePool = nil
+  }
+
+  private func renderFrameIfNeeded() {
+    guard let mpv = videoView.player.mpv else { return }
+    // The OpenGL context must always be locked before locking the isUninited lock to avoid deadlocks.
+    CGLLockContext(cglContext)
+    CGLSetCurrentContext(cglContext)
+    defer { CGLUnlockContext(cglContext) }
     videoView.$isUninited.withReadLock() { isUninited in
-      guard !isUninited else { return }
-
-      needsFlip = false
+      guard !isUninited, let renderContext = mpv.mpvRenderContext else { return }
+      let forced = forceDraw
       forceDraw = false
+      guard mpv.shouldRenderUpdateFrame() || forced else { return }
+      guard let frame = nextFrame() else { return }
+      render(renderContext, into: frame)
+      CVBufferSetAttachments(frame.pixelBuffer, colorimetry.pixelBufferAttachments as CFDictionary, .shouldPropagate)
+      present(frame.pixelBuffer)
+      deliverPendingSnapshot(of: frame.pixelBuffer)
+    }
+  }
 
-      let mpv = videoView.player.mpv!
+  private var pixelSize: (width: Int, height: Int) {
+    let size = bounds.size
+    return (Int((size.width * contentsScale).rounded()), Int((size.height * contentsScale).rounded()))
+  }
 
-      glClear(GLbitfield(GL_COLOR_BUFFER_BIT))
+  private func nextFrame() -> Frame? {
+    let size = pixelSize
+    guard size.width > 0, size.height > 0 else { return nil }
+    if framePool?.width != size.width || framePool?.height != size.height {
+      releaseFrames()
+      framePool = FramePool(width: size.width, height: size.height, context: cglContext)
+    }
+    return framePool?.nextFrame()
+  }
 
-      var i: GLint = 0
-      glGetIntegerv(GLenum(GL_DRAW_FRAMEBUFFER_BINDING), &i)
-      var dims: [GLint] = [0, 0, 0, 0]
-      glGetIntegerv(GLenum(GL_VIEWPORT), &dims);
-
-      var flip: CInt = 1
-
+  private func render(_ renderContext: OpaquePointer, into frame: Frame) {
+    var framebuffer = mpv_opengl_fbo(fbo: Int32(frame.framebuffer), w: Int32(frame.width), h: Int32(frame.height),
+                                     internal_format: Int32(GL_RGBA16F))
+    var flip: CInt = 0
+    var depth: CInt = FramePool.bitsPerComponent
+    withUnsafeMutablePointer(to: &framebuffer) { framebuffer in
       withUnsafeMutablePointer(to: &flip) { flip in
-        if let context = mpv.mpvRenderContext {
-          fbo = i != 0 ? i : fbo
-
-          var data = mpv_opengl_fbo(fbo: Int32(fbo),
-                                    w: Int32(dims[2]),
-                                    h: Int32(dims[3]),
-                                    internal_format: 0)
-          withUnsafeMutablePointer(to: &data) { data in
-            withUnsafeMutablePointer(to: &bufferDepth) { bufferDepth in
-              var params: [mpv_render_param] = [
-                mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: .init(data)),
-                mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: .init(flip)),
-                mpv_render_param(type: MPV_RENDER_PARAM_DEPTH, data:.init(bufferDepth)),
-                mpv_render_param()
-              ]
-              mpv_render_context_render(context, &params)
-              ignoreGLError()
-            }
-          }
-        } else {
-          glClearColor(0, 0, 0, 1)
-          glClear(GLbitfield(GL_COLOR_BUFFER_BIT))
+        withUnsafeMutablePointer(to: &depth) { depth in
+          var params: [mpv_render_param] = [
+            mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: .init(framebuffer)),
+            mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: .init(flip)),
+            mpv_render_param(type: MPV_RENDER_PARAM_DEPTH, data: .init(depth)),
+            mpv_render_param()
+          ]
+          mpv_render_context_render(renderContext, &params)
         }
       }
-      glFlush()
-
-      let handler = snapshotLock.withLock { () -> ((NSImage?) -> Void)? in
-        let handler = pendingSnapshotHandler
-        pendingSnapshotHandler = nil
-        return handler
-      }
-      if let handler {
-        let image = framebufferSnapshot(width: Int(dims[2]), height: Int(dims[3]))
-        handler(image)
-      }
     }
+    glFinish()
+  }
+
+  private func present(_ pixelBuffer: CVPixelBuffer) {
+    guard let sampleBuffer = ViewLayer.displayImmediatelySampleBuffer(pixelBuffer) else { return }
+    if #available(macOS 14.0, *) {
+      if sampleBufferRenderer.status == .failed { sampleBufferRenderer.flush() }
+      sampleBufferRenderer.enqueue(sampleBuffer)
+    } else {
+      if status == .failed { flush() }
+      enqueue(sampleBuffer)
+    }
+  }
+
+  private static func displayImmediatelySampleBuffer(_ pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+    var formatDescription: CMVideoFormatDescription?
+    CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pixelBuffer,
+                                                 formatDescriptionOut: &formatDescription)
+    guard let formatDescription else { return nil }
+    var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+    var sampleBuffer: CMSampleBuffer?
+    CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: pixelBuffer,
+                                             formatDescription: formatDescription, sampleTiming: &timing,
+                                             sampleBufferOut: &sampleBuffer)
+    guard let sampleBuffer,
+          let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) as? [NSMutableDictionary],
+          let sampleAttachments = attachments.first else { return nil }
+    sampleAttachments[kCMSampleAttachmentKey_DisplayImmediately] = true
+    return sampleBuffer
   }
 
   // MARK: - Snapshot
 
   private let snapshotLock = Lock()
   private var pendingSnapshotHandler: ((NSImage?) -> Void)?
+  private lazy var snapshotContext = CIContext()
 
   /// Capture the next rendered frame as an `NSImage`. Forces a redraw so this works while paused.
   func captureSnapshot() async -> NSImage? {
@@ -252,150 +278,42 @@ class ViewLayer: CAOpenGLLayer {
     }
   }
 
-  override func copyCGLPixelFormat(forDisplayMask mask: UInt32) -> CGLPixelFormatObj { cglPixelFormat }
-
-  override func copyCGLContext(forPixelFormat pf: CGLPixelFormatObj) -> CGLContextObj { cglContext }
-
-  /// Reload the content of this layer.
-  /// - Important: Because this method is called by tasks on the `mpvGLQueue` an explicit
-  ///     [CATransaction](https://developer.apple.com/documentation/quartzcore/catransaction) **must**
-  ///     be used. Otherwise if `CA_ASSERT_MAIN_THREAD_TRANSACTIONS` is set to check for unintended UI operations on
-  ///     something other than the main thread, IINA will crash with a SIGABRT reporting "an implicit transaction wasn't created on a
-  ///     main thread". See issue [#5038](https://github.com/iina/iina/issues/5038).
-  override func display() {
-
-    // May need to block other threads to allow the main thread to lock displayLock.
-    mainThreadPriorityLock.beforeLocking()
-    displayLock.lock()
-    defer { displayLock.unlock() }
-    mainThreadPriorityLock.afterLocked()
-
-    let isUpdate = needsFlip
-
-    if Thread.isMainThread {
-      super.display()
-    } else {
-      // When not on the main thread use an explicit transaction.
-      CATransaction.begin()
-      super.display()
-      CATransaction.commit()
+  private func deliverPendingSnapshot(of pixelBuffer: CVPixelBuffer) {
+    let handler = snapshotLock.withLock { () -> ((NSImage?) -> Void)? in
+      let handler = pendingSnapshotHandler
+      pendingSnapshotHandler = nil
+      return handler
     }
-
-    // The call to commit will not render the explicit transaction if it is nested in an implicit
-    // transaction. This can happen when drawing is being forced after a change to the view such as
-    // resizing. Must call flush to ensure any implicit transaction is flushed.
-    CATransaction.flush()
-
-    guard isUpdate && needsFlip else { return }
-
-    // Must lock the OpenGL context before calling mpv render methods. The OpenGL context must
-    // always be locked before locking the isUninited lock to avoid deadlocks.
-    videoView.player.mpv.lockAndSetOpenGLContext()
-    defer { videoView.player.mpv.unlockOpenGLContext() }
-    videoView.$isUninited.withReadLock() { isUninited in
-      guard !isUninited else { return }
-
-      // Neither canDraw nor draw(inCGLContext:) were called by AppKit, needs a skip render.
-      // This can happen when IINA is playing in another space, as might occur when just playing
-      // audio. See issue #5025.
-      if let renderContext = videoView.player.mpv.mpvRenderContext,
-         videoView.player.mpv.shouldRenderUpdateFrame() {
-        var skip: CInt = 1
-        withUnsafeMutablePointer(to: &skip) { skip in
-          var params: [mpv_render_param] = [
-            mpv_render_param(type: MPV_RENDER_PARAM_SKIP_RENDERING, data: .init(skip)),
-            mpv_render_param()
-          ]
-          mpv_render_context_render(renderContext, &params)
-        }
-      }
-    }
-  }
-
-  func update(force: Bool = false) {
-    mpvGLQueue.async { [self] in
-      if force { forceDraw = true }
-      needsFlip = true
-      display()
-    }
-  }
-
-  private func framebufferSnapshot(width: Int, height: Int) -> NSImage? {
-    let bytesPerRow = width * 4
-    var pixels = Data(count: height * bytesPerRow)
-
-    // Save and restore the read framebuffer binding so we don't disturb AppKit/mpv state.
-    var prevReadFBO: GLint = 0
-    glGetIntegerv(GLenum(GL_READ_FRAMEBUFFER_BINDING), &prevReadFBO)
-    defer { glBindFramebuffer(GLenum(GL_READ_FRAMEBUFFER), GLuint(prevReadFBO)) }
-
-    // The layer renders into an FBO (captured as `fbo`), not the default framebuffer,
-    // so we must bind that FBO as the read target and use GL_COLOR_ATTACHMENT0 — not GL_BACK.
-    glBindFramebuffer(GLenum(GL_READ_FRAMEBUFFER), GLuint(fbo))
-    glReadBuffer(GLenum(GL_COLOR_ATTACHMENT0))
-    glPixelStorei(GLenum(GL_PACK_ALIGNMENT), 1)
-
-    pixels.withUnsafeMutableBytes { buf in
-      guard let base = buf.baseAddress else { return }
-      glReadPixels(0, 0, GLsizei(width), GLsizei(height),
-                   GLenum(GL_RGBA), GLenum(GL_UNSIGNED_BYTE), base)
-
-      // OpenGL origin is bottom-left; CGImage expects top-left. Flip rows in place.
-      var temp = [UInt8](repeating: 0, count: bytesPerRow)
-      temp.withUnsafeMutableBufferPointer { tempBuf in
-        let tmp = UnsafeMutableRawPointer(tempBuf.baseAddress!)
-        for i in 0..<(height / 2) {
-          let top = base.advanced(by: i * bytesPerRow)
-          let bot = base.advanced(by: (height - 1 - i) * bytesPerRow)
-          memcpy(tmp, top, bytesPerRow)
-          memcpy(top, bot, bytesPerRow)
-          memcpy(bot, tmp, bytesPerRow)
-        }
-      }
-    }
-
-    guard let provider = CGDataProvider(data: pixels as CFData) else { return nil }
-    guard let cgImage = CGImage(
-      width: width,
-      height: height,
-      bitsPerComponent: 8,
-      bitsPerPixel: 32,
-      bytesPerRow: bytesPerRow,
-      space: CGColorSpaceCreateDeviceRGB(),
-      bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-      provider: provider,
-      decode: nil,
-      shouldInterpolate: false,
-      intent: .defaultIntent
-    ) else { return nil }
-
-    return NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
+    guard let handler else { return }
+    let image = CIImage(cvPixelBuffer: pixelBuffer)
+    let cgImage = snapshotContext.createCGImage(image, from: image.extent, format: .RGBA8,
+                                                colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+    handler(cgImage.map { NSImage(cgImage: $0, size: image.extent.size) })
   }
 
   // MARK: - Core OpenGL Context and Pixel Format
 
-  private static func createPixelFormat(_ player: PlayerCore) -> (CGLPixelFormatObj, GLint) {
+  private static func createPixelFormat(_ player: PlayerCore) -> CGLPixelFormatObj {
     var pix: CGLPixelFormatObj?
-    var depth: GLint = 8
     var err: CGLError = CGLError(rawValue: 0)
     let swRender: CocoaCbSwRenderer = player.mpv.getEnum(MPVOption.GPURendererOptions.cocoaCbSwRenderer)
 
     if swRender != .yes {
-      (pix, depth, err) = ViewLayer.findPixelFormat(player)
+      (pix, err) = ViewLayer.findPixelFormat(player)
     }
 
     if (err != kCGLNoError || pix == nil) && swRender != .no {
-      (pix, depth, err) = ViewLayer.findPixelFormat(player, software: true)
+      (pix, err) = ViewLayer.findPixelFormat(player, software: true)
     }
 
     guard let pixelFormat = pix, err == kCGLNoError else {
       Logger.fatal("Cannot create OpenGL pixel format!")
     }
 
-    return (pixelFormat, depth)
+    return pixelFormat
   }
 
-  private static func findPixelFormat(_ player: PlayerCore, software: Bool = false) -> (CGLPixelFormatObj?, GLint, CGLError) {
+  private static func findPixelFormat(_ player: PlayerCore, software: Bool = false) -> (CGLPixelFormatObj?, CGLError) {
     let subsystem = Logger.makeSubsystem("layer\(player.playerNumber)", ["square.2.layers.3d.bottom.filled"])
     var pix: CGLPixelFormatObj?
     var err: CGLError = CGLError(rawValue: 0)
@@ -428,7 +346,7 @@ class ViewLayer: CAOpenGLLayer {
 
           Logger.log("Created CGL pixel format with attributes: " +
                      "\(attArray.joined(separator: ", "))", subsystem: subsystem)
-          return (pix, glFormat.contains(glFormat10Bit) ? 16 : 8, err)
+          return (pix, err)
         }
       }
     }
@@ -441,7 +359,7 @@ class ViewLayer: CAOpenGLLayer {
       Logger.log("Falling back to software renderer", subsystem: subsystem)
     }
 
-    return (pix, 8, err)
+    return (pix, err)
   }
 
   private static func createContext(_ pixelFormat: CGLPixelFormatObj) -> CGLContextObj {
@@ -452,137 +370,101 @@ class ViewLayer: CAOpenGLLayer {
       Logger.fatal("Cannot create OpenGL context!")
     }
 
-    // Sync to vertical retrace.
-    var i: GLint = 1
-    CGLSetParameter(ctx, kCGLCPSwapInterval, &i)
-
     // Enable multi-threaded GL engine.
     CGLEnable(ctx, kCGLCEMPEngine)
 
     CGLSetCurrentContext(ctx)
     return ctx
   }
-
-  // MARK: - ICC Profile
-
-#if USE_ICC_PROFILE_AUTO // See VideoView.setICCProfile.
-  /// Set an ICC profile for use with the mpv [icc-profile-auto](https://mpv.io/manual/stable/#options-icc-profile-auto)
-  /// option.
-  ///
-  /// This method fulfills the mpv requirement that applications using libmpv with the render API provide the ICC profile via
-  /// `MPV_RENDER_PARAM_ICC_PROFILE` in order for the `--icc-profile-auto` option to work. The ICC profile data will not
-  /// be used by mpv unless the option is enabled.
-  ///
-  /// The IINA `Load ICC profile` setting is tied to the `--icc-profile-auto` option. This allows users to override IINA using
-  /// the [--icc-profile](https://mpv.io/manual/stable/#options-icc-profile) option.
-  func setRenderICCProfile(_ profile: NSColorSpace) {
-    // The OpenGL context must always be locked before locking the isUninited lock to avoid
-    // deadlocks.
-    videoView.player.mpv.lockAndSetOpenGLContext()
-    defer { videoView.player.mpv.unlockOpenGLContext() }
-    videoView.$isUninited.withReadLock() { isUninited in
-      guard !isUninited else { return }
-
-      guard let renderContext = videoView.player.mpv.mpvRenderContext else { return }
-      guard var iccData = profile.iccProfileData else {
-        let name = profile.localizedName ?? "unnamed"
-        Logger.log("Color space \(name) does not contain ICC profile data", level: .warning)
-        return
-      }
-      iccData.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) in
-        guard let baseAddress = ptr.baseAddress, ptr.count > 0 else { return }
-
-        let u8Ptr = baseAddress.assumingMemoryBound(to: UInt8.self)
-        var icc = mpv_byte_array(data: u8Ptr, size: ptr.count)
-        withUnsafeMutableBytes(of: &icc) { (ptr: UnsafeMutableRawBufferPointer) in
-          let params = mpv_render_param(type: MPV_RENDER_PARAM_ICC_PROFILE, data: ptr.baseAddress)
-          mpv_render_context_set_parameter(renderContext, params)
-        }
-      }
-    }
-  }
-#endif // USE_ICC_PROFILE_AUTO
-
-  // MARK: - Utils
-
-  /** Check OpenGL error (for debug only). */
-  func gle() {
-    let e = glGetError()
-    print(arc4random())
-    switch e {
-    case GLenum(GL_NO_ERROR):
-      break
-    case GLenum(GL_OUT_OF_MEMORY):
-      print("GL_OUT_OF_MEMORY")
-      break
-    case GLenum(GL_INVALID_ENUM):
-      print("GL_INVALID_ENUM")
-      break
-    case GLenum(GL_INVALID_VALUE):
-      print("GL_INVALID_VALUE")
-      break
-    case GLenum(GL_INVALID_OPERATION):
-      print("GL_INVALID_OPERATION")
-      break
-    case GLenum(GL_INVALID_FRAMEBUFFER_OPERATION):
-      print("GL_INVALID_FRAMEBUFFER_OPERATION")
-      break
-    case GLenum(GL_STACK_UNDERFLOW):
-      print("GL_STACK_UNDERFLOW")
-      break
-    case GLenum(GL_STACK_OVERFLOW):
-      print("GL_STACK_OVERFLOW")
-      break
-    default:
-      break
-    }
-  }
-
-  func ignoreGLError() {
-    glGetError()
-  }
 }
 
-// MARK: - Main Thread Priority
+// MARK: - Frames
 
-/// Lock used to give the main thread priority access to another lock.
+private struct Frame {
+  let pixelBuffer: CVPixelBuffer
+  let framebuffer: GLuint
+  let width: Int
+  let height: Int
+}
+
+/// IOSurface-backed half float pixel buffers of one size, each wrapped in an OpenGL framebuffer mpv can render into.
 ///
-/// Testing revealed that the main thread encounters lock starvation while trying to acquire `displayLock` when the `mpvGLQueue`
-/// thread is constantly locking and unlocking the lock during playback. This sometimes results in a severe hang causing the spinning
-/// beach ball of death to be displayed. This lock uses a
-/// [NSCondition](https://developer.apple.com/documentation/foundation/nscondition) to block other threads
-/// when the main thread needs to lock a lock, giving the main thread a chance to acquire the lock.
-private class MainThreadPriorityLock {
+/// Accessed only with `context` locked and current.
+private final class FramePool {
+  static let bitsPerComponent: CInt = 16
 
-  private let lock = NSCondition()
+  let width: Int
+  let height: Int
+  private let context: CGLContextObj
+  private let pixelBufferPool: CVPixelBufferPool
+  private var framebufferBySurfaceID: [IOSurfaceID: (framebuffer: GLuint, texture: GLuint)] = [:]
 
-  /// `True` when the main thread is waiting to lock a lock; `false` otherwise.
-  private var needsLock = false
-
-  /// All threads call this before attempting to lock a lock the main thread has trouble acquiring.
-  ///
-  /// When called by the main thread this function will record that the main thread is waiting for a lock. When called by other threads
-  /// this function will block the thread if the main thread is waiting, allowing it to proceed once the main thread has locked the lock.
-  func beforeLocking() {
-    lock.lock()
-    defer { lock.unlock() }
-    guard Thread.isMainThread else {
-      while needsLock { lock.wait() }
-      return
-    }
-    needsLock = true
+  init?(width: Int, height: Int, context: CGLContextObj) {
+    let poolAttributes: [CFString: Any] = [kCVPixelBufferPoolMinimumBufferCountKey: 3]
+    let pixelBufferAttributes: [CFString: Any] = [
+      kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_64RGBAHalf,
+      kCVPixelBufferWidthKey: width,
+      kCVPixelBufferHeightKey: height,
+      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+      kCVPixelBufferOpenGLCompatibilityKey: true,
+    ]
+    var pool: CVPixelBufferPool?
+    CVPixelBufferPoolCreate(nil, poolAttributes as CFDictionary, pixelBufferAttributes as CFDictionary, &pool)
+    guard let pool else { return nil }
+    self.width = width
+    self.height = height
+    self.context = context
+    pixelBufferPool = pool
   }
 
-  /// All threads call this after locking a lock the main thread has trouble acquiring.
-  ///
-  /// When called by the main thread this function will record that the main thread has the lock and will allow any blocked threads to
-  /// proceed. When called by other threads this function does nothing. This avoids the caller only calling this when running on the
-  /// main thread.
-  func afterLocked() {
-    guard Thread.isMainThread else { return }
-    lock.lock()
-    defer { lock.unlock() }
-    needsLock = false
-    lock.broadcast()
+  func nextFrame() -> Frame? {
+    var pixelBuffer: CVPixelBuffer?
+    CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &pixelBuffer)
+    guard let pixelBuffer, let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else {
+      return nil
+    }
+    CVBufferRemoveAllAttachments(pixelBuffer)
+    let surfaceID = IOSurfaceGetID(surface)
+    if let cached = framebufferBySurfaceID[surfaceID] {
+      return Frame(pixelBuffer: pixelBuffer, framebuffer: cached.framebuffer, width: width, height: height)
+    }
+    guard let created = makeFramebuffer(over: surface) else { return nil }
+    framebufferBySurfaceID[surfaceID] = created
+    return Frame(pixelBuffer: pixelBuffer, framebuffer: created.framebuffer, width: width, height: height)
+  }
+
+  func deleteFramebuffers() {
+    for (framebuffer, texture) in framebufferBySurfaceID.values {
+      var framebuffer = framebuffer
+      var texture = texture
+      glDeleteFramebuffers(1, &framebuffer)
+      glDeleteTextures(1, &texture)
+    }
+    framebufferBySurfaceID.removeAll()
+  }
+
+  private func makeFramebuffer(over surface: IOSurfaceRef) -> (framebuffer: GLuint, texture: GLuint)? {
+    var texture: GLuint = 0
+    glGenTextures(1, &texture)
+    glBindTexture(GLenum(GL_TEXTURE_RECTANGLE), texture)
+    let bound = CGLTexImageIOSurface2D(context, GLenum(GL_TEXTURE_RECTANGLE), GLenum(GL_RGBA16F),
+                                       GLsizei(width), GLsizei(height), GLenum(GL_RGBA), GLenum(GL_HALF_FLOAT),
+                                       surface, 0)
+    glBindTexture(GLenum(GL_TEXTURE_RECTANGLE), 0)
+    var framebuffer: GLuint = 0
+    glGenFramebuffers(1, &framebuffer)
+    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), framebuffer)
+    glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0), GLenum(GL_TEXTURE_RECTANGLE),
+                           texture, 0)
+    let status = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
+    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+    guard bound == kCGLNoError, status == GLenum(GL_FRAMEBUFFER_COMPLETE) else {
+      Logger.log("Cannot render into IOSurface: CGL error \(bound.rawValue), framebuffer status \(status)",
+                 level: .error)
+      glDeleteFramebuffers(1, &framebuffer)
+      glDeleteTextures(1, &texture)
+      return nil
+    }
+    return (framebuffer, texture)
   }
 }
