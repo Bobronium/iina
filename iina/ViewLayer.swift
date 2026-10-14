@@ -61,10 +61,7 @@ let attributeLookUp: [UInt32: String] = [
     kCGLPFASupportsAutomaticGraphicsSwitching.rawValue: "kCGLPFASupportsAutomaticGraphicsSwitching"
 ]
 
-/// Video layer for `VideoView`.
-///
-/// mpv renders each frame with OpenGL into an IOSurface-backed pixel buffer that is tagged with the colorimetry mpv
-/// rendered in and enqueued here, so macOS color matches and tone maps it the same way it does for QuickTime Player.
+/// Video layer for `VideoView`: presents frames mpv renders as tagged pixel buffers.
 ///
 /// ```swift
 /// videoLayer.colorimetry = mpv.videoColorimetry()!.presentable
@@ -73,7 +70,6 @@ let attributeLookUp: [UInt32: String] = [
 /// ```
 class ViewLayer: AVSampleBufferDisplayLayer {
 
-  /// `true` when macOS can be asked to tone map HDR frames down to SDR.
   static var canShowHighDynamicRangeAsStandard: Bool {
     if #available(macOS 26.0, *) { return true }
     return false
@@ -87,7 +83,10 @@ class ViewLayer: AVSampleBufferDisplayLayer {
   private let cglPixelFormat: CGLPixelFormatObj
 
   /// Accessed only on `mpvGLQueue` with the OpenGL context locked.
-  private var framePool: FramePool?
+  private var framePool: VideoFramePool?
+
+  /// Accessed only on `mpvGLQueue` with the OpenGL context locked.
+  private lazy var frameEncoder: YCbCrEncoder? = usesCoreProfile ? YCbCrEncoder() : nil
 
   @Atomic var colorimetry = VideoColorimetry.standardDynamicRange
 
@@ -184,9 +183,16 @@ class ViewLayer: AVSampleBufferDisplayLayer {
       let forced = forceDraw
       forceDraw = false
       guard mpv.shouldRenderUpdateFrame() || forced else { return }
-      guard let frame = nextFrame() else { return }
+      guard let pool = currentFramePool(), let frame = pool.nextFrame() else { return }
+      let colorimetry = colorimetry
       render(renderContext, into: frame)
-      CVBufferSetAttachments(frame.pixelBuffer, colorimetry.pixelBufferAttachments as CFDictionary, .shouldPropagate)
+      pool.finish(frame, matrix: colorimetry.ycbcrMatrix)
+      CVBufferSetAttachments(frame.pixelBuffer, colorimetry.pixelBufferAttachments(for: pool.encoding) as CFDictionary,
+                             .shouldPropagate)
+      if pool.encoding == .ycbcr {
+        ViewLayer.attachDolbyVision(mpv.renderedFrameDolbyVisionRPU(), compatibilityID: colorimetry.dolbyVisionCompatibilityID,
+                                    to: frame.pixelBuffer)
+      }
       present(frame.pixelBuffer)
       deliverPendingSnapshot(of: frame.pixelBuffer)
     }
@@ -197,21 +203,47 @@ class ViewLayer: AVSampleBufferDisplayLayer {
     return (Int((size.width * contentsScale).rounded()), Int((size.height * contentsScale).rounded()))
   }
 
-  private func nextFrame() -> Frame? {
+  private var usesCoreProfile: Bool {
+    var profile: GLint = 0
+    CGLDescribePixelFormat(cglPixelFormat, 0, kCGLPFAOpenGLProfile, &profile)
+    return profile != GLint(kCGLOGLPVersion_Legacy.rawValue)
+  }
+
+  private func currentFramePool() -> VideoFramePool? {
     let size = pixelSize
     guard size.width > 0, size.height > 0 else { return nil }
     if framePool?.width != size.width || framePool?.height != size.height {
       releaseFrames()
-      framePool = FramePool(width: size.width, height: size.height, context: cglContext)
+      framePool = VideoFramePool(width: size.width, height: size.height, encoding: .ycbcr, encoder: frameEncoder,
+                                 context: cglContext)
+        ?? VideoFramePool(width: size.width, height: size.height, encoding: .rgb, encoder: nil, context: cglContext)
     }
-    return framePool?.nextFrame()
+    return framePool
   }
 
-  private func render(_ renderContext: OpaquePointer, into frame: Frame) {
-    var framebuffer = mpv_opengl_fbo(fbo: Int32(frame.framebuffer), w: Int32(frame.width), h: Int32(frame.height),
-                                     internal_format: Int32(GL_RGBA16F))
+  private static let dolbyVisionRPUKey = "DolbyVisionRPUData" as CFString
+  private static let dolbyCompatibilityIDKey = "DolbyCompatibilityID" as CFString
+
+  private static func attachDolbyVision(_ rpu: Data?, compatibilityID: Int?, to pixelBuffer: CVPixelBuffer) {
+    guard let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else { return }
+    guard let rpu, let compatibilityID else {
+      IOSurfaceRemoveValue(surface, dolbyVisionRPUKey)
+      IOSurfaceRemoveValue(surface, dolbyCompatibilityIDKey)
+      return
+    }
+    let tags: [CFString: CFTypeRef] = [dolbyVisionRPUKey: rpu as CFData,
+                                       dolbyCompatibilityIDKey: compatibilityID as CFNumber]
+    for (key, value) in tags {
+      CVBufferSetAttachment(pixelBuffer, key, value, .shouldPropagate)
+      IOSurfaceSetValue(surface, key, value)
+    }
+  }
+
+  private func render(_ renderContext: OpaquePointer, into frame: VideoFrame) {
+    var framebuffer = mpv_opengl_fbo(fbo: Int32(frame.renderFramebuffer), w: Int32(frame.width),
+                                     h: Int32(frame.height), internal_format: Int32(VideoFramePool.renderInternalFormat))
     var flip: CInt = 0
-    var depth: CInt = FramePool.bitsPerComponent
+    var depth: CInt = 16
     withUnsafeMutablePointer(to: &framebuffer) { framebuffer in
       withUnsafeMutablePointer(to: &flip) { flip in
         withUnsafeMutablePointer(to: &depth) { depth in
@@ -225,7 +257,6 @@ class ViewLayer: AVSampleBufferDisplayLayer {
         }
       }
     }
-    glFinish()
   }
 
   private func present(_ pixelBuffer: CVPixelBuffer) {
@@ -375,96 +406,5 @@ class ViewLayer: AVSampleBufferDisplayLayer {
 
     CGLSetCurrentContext(ctx)
     return ctx
-  }
-}
-
-// MARK: - Frames
-
-private struct Frame {
-  let pixelBuffer: CVPixelBuffer
-  let framebuffer: GLuint
-  let width: Int
-  let height: Int
-}
-
-/// IOSurface-backed half float pixel buffers of one size, each wrapped in an OpenGL framebuffer mpv can render into.
-///
-/// Accessed only with `context` locked and current.
-private final class FramePool {
-  static let bitsPerComponent: CInt = 16
-
-  let width: Int
-  let height: Int
-  private let context: CGLContextObj
-  private let pixelBufferPool: CVPixelBufferPool
-  private var framebufferBySurfaceID: [IOSurfaceID: (framebuffer: GLuint, texture: GLuint)] = [:]
-
-  init?(width: Int, height: Int, context: CGLContextObj) {
-    let poolAttributes: [CFString: Any] = [kCVPixelBufferPoolMinimumBufferCountKey: 3]
-    let pixelBufferAttributes: [CFString: Any] = [
-      kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_64RGBAHalf,
-      kCVPixelBufferWidthKey: width,
-      kCVPixelBufferHeightKey: height,
-      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-      kCVPixelBufferOpenGLCompatibilityKey: true,
-    ]
-    var pool: CVPixelBufferPool?
-    CVPixelBufferPoolCreate(nil, poolAttributes as CFDictionary, pixelBufferAttributes as CFDictionary, &pool)
-    guard let pool else { return nil }
-    self.width = width
-    self.height = height
-    self.context = context
-    pixelBufferPool = pool
-  }
-
-  func nextFrame() -> Frame? {
-    var pixelBuffer: CVPixelBuffer?
-    CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &pixelBuffer)
-    guard let pixelBuffer, let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue() else {
-      return nil
-    }
-    CVBufferRemoveAllAttachments(pixelBuffer)
-    let surfaceID = IOSurfaceGetID(surface)
-    if let cached = framebufferBySurfaceID[surfaceID] {
-      return Frame(pixelBuffer: pixelBuffer, framebuffer: cached.framebuffer, width: width, height: height)
-    }
-    guard let created = makeFramebuffer(over: surface) else { return nil }
-    framebufferBySurfaceID[surfaceID] = created
-    return Frame(pixelBuffer: pixelBuffer, framebuffer: created.framebuffer, width: width, height: height)
-  }
-
-  func deleteFramebuffers() {
-    for (framebuffer, texture) in framebufferBySurfaceID.values {
-      var framebuffer = framebuffer
-      var texture = texture
-      glDeleteFramebuffers(1, &framebuffer)
-      glDeleteTextures(1, &texture)
-    }
-    framebufferBySurfaceID.removeAll()
-  }
-
-  private func makeFramebuffer(over surface: IOSurfaceRef) -> (framebuffer: GLuint, texture: GLuint)? {
-    var texture: GLuint = 0
-    glGenTextures(1, &texture)
-    glBindTexture(GLenum(GL_TEXTURE_RECTANGLE), texture)
-    let bound = CGLTexImageIOSurface2D(context, GLenum(GL_TEXTURE_RECTANGLE), GLenum(GL_RGBA16F),
-                                       GLsizei(width), GLsizei(height), GLenum(GL_RGBA), GLenum(GL_HALF_FLOAT),
-                                       surface, 0)
-    glBindTexture(GLenum(GL_TEXTURE_RECTANGLE), 0)
-    var framebuffer: GLuint = 0
-    glGenFramebuffers(1, &framebuffer)
-    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), framebuffer)
-    glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0), GLenum(GL_TEXTURE_RECTANGLE),
-                           texture, 0)
-    let status = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
-    glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
-    guard bound == kCGLNoError, status == GLenum(GL_FRAMEBUFFER_COMPLETE) else {
-      Logger.log("Cannot render into IOSurface: CGL error \(bound.rawValue), framebuffer status \(status)",
-                 level: .error)
-      glDeleteFramebuffers(1, &framebuffer)
-      glDeleteTextures(1, &texture)
-      return nil
-    }
-    return (framebuffer, texture)
   }
 }

@@ -378,7 +378,6 @@ class VideoView: NSView {
 // MARK: - HDR
 
 extension VideoView {
-  /// Make mpv render in the colorimetry of the video and tell the layer how to present it.
   func refreshEdrMode() {
     guard player.mainWindow.loaded, player.info.state.loaded, let displayId = currentDisplay,
           let mpv = player.mpv else { return }
@@ -424,7 +423,6 @@ extension VideoView {
     mpv.setFlag(MPVOption.Screenshot.screenshotTagColorspace, true)
   }
 
-  /// Set the mpv tone mapping options from IINA's tone mapping settings for HDR video that mpv converts to SDR.
   private func setToneMappingForStandardDynamicRange(_ mpv: MPVController) {
     guard Preference.bool(for: .enableToneMapping) else { return }
     let targetPeak = Preference.bool(for: .enableToneMappingTargetPeakOverride)

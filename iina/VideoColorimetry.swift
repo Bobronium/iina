@@ -16,16 +16,16 @@ import CoreVideo
 struct VideoColorimetry: Equatable {
   let primaries: String
   let transfer: String
+  var matrix = "auto"
   var signalPeakNits: Double? = nil
   var masteringDisplay: MasteringDisplay? = nil
   var contentLightLevel: ContentLightLevel? = nil
+  var dolbyVisionProfile: Int? = nil
 
-  static let standardDynamicRange = VideoColorimetry(primaries: "bt.709", transfer: "bt.1886")
+  static let standardDynamicRange = VideoColorimetry(primaries: "bt.709", transfer: "bt.1886", matrix: "bt.709")
 
   var isHDR: Bool { VideoColorimetry.highDynamicRangeTransfers.contains(transfer) }
 
-  /// mpv `target-peak` that keeps rendering in this colorimetry an identity: the HLG OOTF is undone with the same
-  /// display peak it was applied with.
   var targetPeak: String {
     guard transfer == "hlg", let signalPeakNits else { return "auto" }
     return String(Int(signalPeakNits.rounded()).clamped(to: 10...10000))
@@ -35,15 +35,39 @@ struct VideoColorimetry: Equatable {
     let presentablePrimaries = VideoColorimetry.primariesByName[primaries] == nil ? "bt.2020" : primaries
     let fallbackTransfer = isHDR ? "pq" : "bt.1886"
     let presentableTransfer = VideoColorimetry.transferByName[transfer] == nil ? fallbackTransfer : transfer
-    return VideoColorimetry(primaries: presentablePrimaries, transfer: presentableTransfer,
+    let presentableMatrix = YCbCrMatrix.byName[matrix] == nil
+      ? (presentablePrimaries == "bt.2020" ? "bt.2020-ncl" : "bt.709") : matrix
+    return VideoColorimetry(primaries: presentablePrimaries, transfer: presentableTransfer, matrix: presentableMatrix,
                             signalPeakNits: signalPeakNits, masteringDisplay: masteringDisplay,
-                            contentLightLevel: contentLightLevel)
+                            contentLightLevel: contentLightLevel, dolbyVisionProfile: dolbyVisionProfile)
   }
 
-  var pixelBufferAttachments: [CFString: Any] {
+  var ycbcrMatrix: YCbCrMatrix {
+    YCbCrMatrix.byName[presentable.matrix] ?? .bt709
+  }
+
+  /// Dolby Vision `bl_signal_compatibility_id`.
+  var dolbyVisionCompatibilityID: Int? {
+    switch (dolbyVisionProfile, transfer) {
+    case (5, _): return 0
+    case (7, _): return 6
+    case (8, "pq"): return 1
+    case (8, "hlg"): return 4
+    case (8, _): return 2
+    default: return nil
+    }
+  }
+
+  func pixelBufferAttachments(for encoding: FrameEncoding) -> [CFString: Any] {
     var attachments = coreVideoTags
-    if !isHDR, let colorSpace = VideoColorimetry.decodedVideoColorSpace(taggedWith: attachments) {
-      attachments[kCVImageBufferCGColorSpaceKey] = colorSpace
+    switch encoding {
+    case .ycbcr:
+      attachments[kCVImageBufferYCbCrMatrixKey] = ycbcrMatrix.coreVideoName
+      attachments[kCVImageBufferCGColorSpaceKey] = VideoColorimetry.decodedVideoColorSpace(taggedWith: attachments)
+    case .rgb where !isHDR:
+      attachments[kCVImageBufferCGColorSpaceKey] = VideoColorimetry.decodedVideoColorSpace(taggedWith: attachments)
+    case .rgb:
+      break
     }
     return attachments
   }
@@ -98,6 +122,36 @@ struct VideoColorimetry: Equatable {
     "gamma2.4": .gamma(2.4),
     "gamma2.6": .gamma(2.6),
     "gamma2.8": .gamma(2.8),
+  ]
+}
+
+enum FrameEncoding {
+  case ycbcr
+  case rgb
+}
+
+/// Y'CbCr encoding coefficients, ITU-T H.273.
+struct YCbCrMatrix: Equatable {
+  let redCoefficient: Double
+  let blueCoefficient: Double
+  let coreVideoName: CFString
+
+  static let bt709 = YCbCrMatrix(redCoefficient: 0.2126, blueCoefficient: 0.0722,
+                                 coreVideoName: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+  static let bt601 = YCbCrMatrix(redCoefficient: 0.299, blueCoefficient: 0.114,
+                                 coreVideoName: kCVImageBufferYCbCrMatrix_ITU_R_601_4)
+  static let bt2020 = YCbCrMatrix(redCoefficient: 0.2627, blueCoefficient: 0.0593,
+                                  coreVideoName: kCVImageBufferYCbCrMatrix_ITU_R_2020)
+  static let smpte240 = YCbCrMatrix(redCoefficient: 0.212, blueCoefficient: 0.087,
+                                    coreVideoName: kCVImageBufferYCbCrMatrix_SMPTE_240M_1995)
+
+  static let byName: [String: YCbCrMatrix] = [
+    "bt.709": .bt709,
+    "bt.601": .bt601,
+    "bt.2020-ncl": .bt2020,
+    "bt.2020-cl": .bt2020,
+    "dolbyvision": .bt2020,
+    "smpte-240m": .smpte240,
   ]
 }
 
@@ -156,9 +210,23 @@ extension MPVController {
           let transfer = getString(MPVProperty.videoParamsGamma) else { return nil }
     let signalPeak = optionalDouble(MPVProperty.videoParamsSigPeak).flatMap { $0 > 0 ? $0 : nil }
     return VideoColorimetry(primaries: primaries, transfer: transfer,
+                            matrix: getString(MPVProperty.videoParamsColormatrix) ?? "auto",
                             signalPeakNits: signalPeak.map { $0 * MPVController.referenceWhiteNits },
                             masteringDisplay: masteringDisplay(containerPrimaries: primaries),
-                            contentLightLevel: contentLightLevel())
+                            contentLightLevel: contentLightLevel(),
+                            dolbyVisionProfile: getString(MPVProperty.currentTracksVideoDolbyVisionProfile).flatMap(Int.init))
+  }
+
+  /// - Important: Call on the rendering thread right after `mpv_render_context_render`.
+  func renderedFrameDolbyVisionRPU() -> Data? {
+    guard let mpvRenderContext else { return nil }
+    var rpu = mpv_byte_array()
+    let status = withUnsafeMutablePointer(to: &rpu) { pointer in
+      mpv_render_context_get_info(mpvRenderContext, mpv_render_param(type: MPV_RENDER_PARAM_DOVI_RPU, data: pointer))
+    }
+    guard status >= 0, let bytes = rpu.data, rpu.size > 0 else { return nil }
+    defer { mpv_free(bytes) }
+    return Data(bytes: bytes, count: rpu.size)
   }
 
   private func optionalDouble(_ property: String) -> Double? {
