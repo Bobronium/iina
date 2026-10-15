@@ -412,7 +412,7 @@ class MainWindowController: PlayerWindowController {
 
   lazy var pluginOverlayViewContainer: NSView! = {
     guard let window, let cv = window.contentView else { return nil }
-    let view = NSView(frame: .zero)
+    let view = PluginOverlayContainerView(frame: .zero)
     view.translatesAutoresizingMaskIntoConstraints = false
     cv.addSubview(view, positioned: .below, relativeTo: bufferIndicatorView)
     Utility.quickConstraints(["H:|[v]|", "V:|[v]|"], ["v": view])

@@ -98,6 +98,9 @@
 		34AAF822302EAF7800E9835C /* libwebp.7.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 34AAF7CA302EAF6500E9835C /* libwebp.7.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		34AAF823302EAF7800E9835C /* libwebpmux.3.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 34AAF7CB302EAF6500E9835C /* libwebpmux.3.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		34AAF824302EAF7800E9835C /* libzimg.2.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 34AAF7CC302EAF6500E9835C /* libzimg.2.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		D76DCA82B8F4A4A6E8E796D0 /* libaribcaption.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 8B2FE16F17793B00605CE542 /* libaribcaption.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		1CBC3AC568DEFD38ED151064 /* libcrypto.4.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 0A2FE4F138E075C2BDE3FE4B /* libcrypto.4.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		50A6CE56660EFE2DF248F658 /* libssl.4.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 60F6D06085370BF22C4E923B /* libssl.4.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		34AAF825302EAF7800E9835C /* libzstd.1.dylib in Copy Dylibs */ = {isa = PBXBuildFile; fileRef = 34AAF7CD302EAF6500E9835C /* libzstd.1.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		34C4D19C2FC58482006B829F /* LiveTextSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34C4D19B2FC58482006B829F /* LiveTextSupport.swift */; };
 		34F294C02C0B68B300F14962 /* Contribution.rtf in Resources */ = {isa = PBXBuildFile; fileRef = 34F294BF2C0B68B300F14962 /* Contribution.rtf */; };
@@ -215,6 +218,8 @@
 		84A0BA991D2FAAA700BC8DA1 /* MPVController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A0BA981D2FAAA700BC8DA1 /* MPVController.swift */; };
 		84A0BA9E1D2FAD4000BC8DA1 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A0BA9C1D2FAD4000BC8DA1 /* MainWindowController.swift */; };
 		84A0BAA11D2FAE7600BC8DA1 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A0BAA01D2FAE7600BC8DA1 /* VideoView.swift */; };
+		17E8FE62FA099063A08649B1 /* VideoColorimetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E55D6DBCF35DCC6748F1DA1A /* VideoColorimetry.swift */; };
+		CC06B5E613AC5ED9657A98DB /* VideoFramePool.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6A0EC706581B193DF9B567D /* VideoFramePool.swift */; };
 		84A886E41E24F37D008755BB /* ShooterSubtitle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A886E31E24F37D008755BB /* ShooterSubtitle.swift */; };
 		84A886E61E24F3BD008755BB /* OnlineSubtitle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A886E51E24F3BD008755BB /* OnlineSubtitle.swift */; };
 		84A886EC1E2573A5008755BB /* JustExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A886EB1E2573A5008755BB /* JustExtension.swift */; };
@@ -483,6 +488,9 @@
 				34AAF822302EAF7800E9835C /* libwebp.7.dylib in Copy Dylibs */,
 				34AAF823302EAF7800E9835C /* libwebpmux.3.dylib in Copy Dylibs */,
 				34AAF824302EAF7800E9835C /* libzimg.2.dylib in Copy Dylibs */,
+				D76DCA82B8F4A4A6E8E796D0 /* libaribcaption.dylib in Copy Dylibs */,
+				1CBC3AC568DEFD38ED151064 /* libcrypto.4.dylib in Copy Dylibs */,
+				50A6CE56660EFE2DF248F658 /* libssl.4.dylib in Copy Dylibs */,
 				34AAF825302EAF7800E9835C /* libzstd.1.dylib in Copy Dylibs */,
 			);
 			name = "Copy Dylibs";
@@ -845,6 +853,9 @@
 		34AAF7CA302EAF6500E9835C /* libwebp.7.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libwebp.7.dylib; path = deps/lib/libwebp.7.dylib; sourceTree = "<group>"; };
 		34AAF7CB302EAF6500E9835C /* libwebpmux.3.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libwebpmux.3.dylib; path = deps/lib/libwebpmux.3.dylib; sourceTree = "<group>"; };
 		34AAF7CC302EAF6500E9835C /* libzimg.2.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libzimg.2.dylib; path = deps/lib/libzimg.2.dylib; sourceTree = "<group>"; };
+		8B2FE16F17793B00605CE542 /* libaribcaption.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libaribcaption.dylib; path = deps/lib/libaribcaption.dylib; sourceTree = "<group>"; };
+		0A2FE4F138E075C2BDE3FE4B /* libcrypto.4.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libcrypto.4.dylib; path = deps/lib/libcrypto.4.dylib; sourceTree = "<group>"; };
+		60F6D06085370BF22C4E923B /* libssl.4.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libssl.4.dylib; path = deps/lib/libssl.4.dylib; sourceTree = "<group>"; };
 		34AAF7CD302EAF6500E9835C /* libzstd.1.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libzstd.1.dylib; path = deps/lib/libzstd.1.dylib; sourceTree = "<group>"; };
 		34ACABFC2C142C5400F871A0 /* codec_desc.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = codec_desc.h; sourceTree = "<group>"; };
 		34ACAC012C142C5400F871A0 /* codec_id.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = codec_id.h; sourceTree = "<group>"; };
@@ -1312,6 +1323,8 @@
 		84A0BA981D2FAAA700BC8DA1 /* MPVController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVController.swift; sourceTree = "<group>"; };
 		84A0BA9C1D2FAD4000BC8DA1 /* MainWindowController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
 		84A0BAA01D2FAE7600BC8DA1 /* VideoView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
+		E55D6DBCF35DCC6748F1DA1A /* VideoColorimetry.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = VideoColorimetry.swift; sourceTree = "<group>"; };
+		B6A0EC706581B193DF9B567D /* VideoFramePool.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = VideoFramePool.swift; sourceTree = "<group>"; };
 		84A0F6021EBB4A7C001FCF44 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InspectorWindowController.strings"; sourceTree = "<group>"; };
 		84A886E31E24F37D008755BB /* ShooterSubtitle.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ShooterSubtitle.swift; sourceTree = "<group>"; };
 		84A886E51E24F3BD008755BB /* OnlineSubtitle.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = OnlineSubtitle.swift; sourceTree = "<group>"; };
@@ -2089,6 +2102,9 @@
 				34AAF7CA302EAF6500E9835C /* libwebp.7.dylib */,
 				34AAF7CB302EAF6500E9835C /* libwebpmux.3.dylib */,
 				34AAF7CC302EAF6500E9835C /* libzimg.2.dylib */,
+				8B2FE16F17793B00605CE542 /* libaribcaption.dylib */,
+				0A2FE4F138E075C2BDE3FE4B /* libcrypto.4.dylib */,
+				60F6D06085370BF22C4E923B /* libssl.4.dylib */,
 				34AAF7CD302EAF6500E9835C /* libzstd.1.dylib */,
 				845E2F491E76CFC2002C6588 /* libz.tbd */,
 				49542974216C34950058F680 /* Cocoa.framework */,
@@ -2353,6 +2369,8 @@
 			children = (
 				8407D13F1E3A684C0043895D /* ViewLayer.swift */,
 				84A0BAA01D2FAE7600BC8DA1 /* VideoView.swift */,
+				E55D6DBCF35DCC6748F1DA1A /* VideoColorimetry.swift */,
+				B6A0EC706581B193DF9B567D /* VideoFramePool.swift */,
 			);
 			name = Video;
 			sourceTree = "<group>";
@@ -3079,6 +3097,8 @@
 				51F7974728C7E00200812D0D /* Lock.swift in Sources */,
 				84C8D58F1D794CE600D98A0E /* MPVFilter.swift in Sources */,
 				84A0BAA11D2FAE7600BC8DA1 /* VideoView.swift in Sources */,
+				17E8FE62FA099063A08649B1 /* VideoColorimetry.swift in Sources */,
+				CC06B5E613AC5ED9657A98DB /* VideoFramePool.swift in Sources */,
 				E395858A253314400096811F /* JavascriptAPISidebarView.swift in Sources */,
 				E3EC8C462F9475C600FBB51E /* PluginStorePanel.swift in Sources */,
 				E33BA5C4204315740069A0F6 /* AssrtSubtitle.swift in Sources */,

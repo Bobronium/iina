@@ -73,13 +73,6 @@ class SettingsPageVideo: SettingsPage {
     return section {
       SettingsList(title: .text_ColorHDR) {
         SettingsItem.Switch()
-          .image(name: ["document.badge.gearshape", "doc.badge.gearshape"])
-          .bindTo(.loadIccProfile)
-          .hasDescription()
-      }
-
-      SettingsList {
-        SettingsItem.Switch()
           .image(name: ["sun.lefthalf.filled", "sun.max"])
           .bindTo(.enableHdrSupport)
           .hasDescription()

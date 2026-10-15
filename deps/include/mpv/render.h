@@ -422,6 +422,19 @@ typedef enum mpv_render_param_type {
      * See MPV_RENDER_PARAM_SW_STRIDE for alignment requirements.
      */
     MPV_RENDER_PARAM_SW_POINTER = 20,
+    /**
+     * Dolby Vision RPU of the video frame drawn by the most recent
+     * mpv_render_context_render() call, as exported by FFmpeg in
+     * AV_FRAME_DATA_DOVI_RPU_BUFFER. Platforms that apply Dolby Vision display
+     * mapping themselves need it next to the frame mpv rendered.
+     *
+     * Valid for mpv_render_context_get_info().
+     * Type: mpv_byte_array*
+     *
+     * If the frame carries no RPU, data is NULL and size is 0. Otherwise data
+     * points to a copy owned by the caller, which must free it with mpv_free().
+     */
+    MPV_RENDER_PARAM_DOVI_RPU = 21,
 } mpv_render_param_type;
 
 /**
