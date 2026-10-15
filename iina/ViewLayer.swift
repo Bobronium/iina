@@ -232,7 +232,7 @@ class ViewLayer: AVSampleBufferDisplayLayer {
       return
     }
     let tags: [CFString: CFTypeRef] = [dolbyVisionRPUKey: rpu as CFData,
-                                       dolbyCompatibilityIDKey: compatibilityID as CFNumber]
+                                       dolbyCompatibilityIDKey: String(compatibilityID) as CFString]
     for (key, value) in tags {
       CVBufferSetAttachment(pixelBuffer, key, value, .shouldPropagate)
       IOSurfaceSetValue(surface, key, value)
