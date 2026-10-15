@@ -16,7 +16,7 @@ struct VideoFrame {
 }
 
 /// ```swift
-/// let pool = VideoFramePool(width: 1920, height: 1080, encoding: .ycbcr, context: cglContext)!
+/// let pool = VideoFramePool(width: 1920, height: 1080, encoding: .ycbcr, encoder: YCbCrEncoder(), context: cglContext)!
 /// let frame = pool.nextFrame()!
 /// renderMPV(into: frame.renderFramebuffer)
 /// pool.finish(frame, matrix: colorimetry.ycbcrMatrix)

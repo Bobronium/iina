@@ -11,7 +11,7 @@ import CoreVideo
 /// let output = mpv.videoColorimetry()!.presentable
 /// mpv.setString(MPVOption.GPURendererOptions.targetPrim, output.primaries)
 /// mpv.setString(MPVOption.GPURendererOptions.targetTrc, output.transfer)
-/// CVBufferSetAttachments(renderedFrame, output.pixelBufferAttachments as CFDictionary, .shouldPropagate)
+/// CVBufferSetAttachments(renderedFrame, output.pixelBufferAttachments(for: .ycbcr) as CFDictionary, .shouldPropagate)
 /// ```
 struct VideoColorimetry: Equatable {
   let primaries: String
