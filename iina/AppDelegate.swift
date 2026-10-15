@@ -20,6 +20,8 @@ fileprivate let NormalMenuItemTag = 0
 fileprivate let AlternativeMenuItemTag = 1
 
 
+private struct UpdateChecksDisabled: Error {}
+
 @NSApplicationMain
 class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
@@ -194,6 +196,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
   func feedURLString(for updater: SPUUpdater) -> String? {
     return Preference.bool(for: .receiveBetaUpdate) ? AppData.appcastBetaLink : AppData.appcastLink
+  }
+
+  func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+    throw UpdateChecksDisabled()
+  }
+
+  func updaterShouldPromptForPermissionToCheck(forUpdates updater: SPUUpdater) -> Bool {
+    false
   }
 
   // MARK: - App Delegate
