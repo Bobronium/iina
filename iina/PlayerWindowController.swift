@@ -49,6 +49,7 @@ class PlayerWindowController: NSWindowController, NSWindowDelegate {
   internal lazy var verticalScrollAction: Preference.ScrollAction = Preference.enum(for: .verticalScrollAction)
   
   internal var observedPrefKeys: [Preference.Key] = [
+    .enableHdrSupport,
     .enableToneMapping,
     .enableToneMappingParamOverride,
     .enableToneMappingTargetPeakOverride,
@@ -77,6 +78,12 @@ class PlayerWindowController: NSWindowController, NSWindowDelegate {
     guard let keyPath, let change else { return }
     
     switch keyPath {
+    case PK.enableHdrSupport.rawValue:
+      if let newValue = change[.newKey] as? Bool {
+        player.info.hdrEnabled = newValue
+        player.postNotification(.iinaHDRChanged)
+        videoView.refreshEdrMode()
+      }
     case PK.enableToneMapping.rawValue,
       PK.enableToneMappingParamOverride.rawValue,
       PK.enableToneMappingTargetPeakOverride.rawValue,
