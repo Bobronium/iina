@@ -397,7 +397,7 @@ extension VideoView {
     }
     let showsHighDynamicRange = hdrAvailable && player.info.hdrEnabled
     let mpvConvertsToStandardDynamicRange = source.isHDR && !showsHighDynamicRange
-      && !ViewLayer.canShowHighDynamicRangeAsStandard
+      && (Preference.bool(for: .enableToneMapping) || !ViewLayer.canShowHighDynamicRangeAsStandard)
     let output = mpvConvertsToStandardDynamicRange ? VideoColorimetry.standardDynamicRange : source.presentable
     logHDR("Video primaries=\(source.primaries) gamma=\(source.transfer), rendering primaries=\(output.primaries) "
            + "gamma=\(output.transfer), high dynamic range shown: \(showsHighDynamicRange)")
